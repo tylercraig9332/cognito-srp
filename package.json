@@ -1,5 +1,5 @@
 {
-  "name": "cognito-srp",
+  "name": "@jhkiehna/cognito-srp",
   "version": "1.0.0",
   "description": "Helps with cognito SRP authentication",
   "main": "dist/index.js",
