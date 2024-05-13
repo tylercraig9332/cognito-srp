@@ -1,0 +1,38 @@
+{
+  "name": "cognito-srp",
+  "version": "1.0.0",
+  "description": "Helps with cognito SRP authentication",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "file": [
+    "dist/**/*"
+  ],
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "tsc": "tsc"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jhkiehna/cognito-srp.git"
+  },
+  "keywords": [
+    "cognito",
+    "srp",
+    "aws"
+  ],
+  "author": "Henry Kiehna",
+  "license": "GPL-2.0",
+  "bugs": {
+    "url": "https://github.com/jhkiehna/cognito-srp/issues"
+  },
+  "homepage": "https://github.com/jhkiehna/cognito-srp#readme",
+  "devDependencies": {
+    "@types/jsdom": "^21.1.6",
+    "jsdom": "^24.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.3"
+  },
+  "dependencies": {
+    "@aws-crypto/sha256-js": "^5.2.0"
+  }
+}
