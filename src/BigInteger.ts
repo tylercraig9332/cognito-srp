@@ -743,7 +743,7 @@ function bnModPow(
     DB: number;
     t: number;
   },
-  callback: Function
+  callback?: Function
 ) {
   let i = e.bitLength();
   let k: number;
@@ -825,7 +825,7 @@ function bnModPow(
     }
   }
   const result = z.revert(r);
-  callback(null, result);
+  if (callback) callback(null, result);
 
   return result;
 }
