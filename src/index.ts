@@ -3,7 +3,7 @@ import { SourceData } from "@smithy/types";
 import BigInteger, { AuthBigInteger } from "./BigInteger";
 
 export default class CognitoSRP {
-  private INIT_N =
+  private readonly INIT_N =
     "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD1" +
     "29024E088A67CC74020BBEA63B139B22514A08798E3404DD" +
     "EF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245" +
@@ -20,34 +20,29 @@ export default class CognitoSRP {
     "F12FFA06D98A0864D87602733EC86A64521F2B18177B200C" +
     "BBE117577A615D6C770988C0BAD946E208E24FA074E5AB31" +
     "43DB5BFCE0FD108E4B82D120A93AD2CAFFFFFFFFFFFFFFFF";
-  private encoder = new TextEncoder();
-  private N: AuthBigInteger;
-  private g: AuthBigInteger;
-  private a: AuthBigInteger;
-  private k: AuthBigInteger;
-  private A: AuthBigInteger = new BigInteger();
+  private readonly N = new BigInteger(this.INIT_N, 16);
+  private readonly g = new BigInteger("2", 16);
+  private readonly k = new BigInteger(
+    this.createHash(`${this.getPaddedHex(this.N)}${this.getPaddedHex(this.g)}`, { from: "hex", to: "hex" }),
+    16
+  );
+  private a!: AuthBigInteger;
+  private A!: AuthBigInteger;
   private info: Uint8Array;
+  private crypto!: Crypto;
+  private encoder = new TextEncoder();
 
-  public timestamp: string;
+  public timestamp!: string;
 
   constructor(private userPoolName: string) {
-    this.N = new BigInteger(this.INIT_N, 16);
-    this.g = new BigInteger("2", 16);
-
-    const buffer = new Uint8Array(16);
-    window.crypto.getRandomValues(buffer);
-    const hexString = this.getHexFromBytes(buffer);
-
-    this.a = new BigInteger(hexString, 16);
-    this.k = new BigInteger(
-      this.createHash(`${this.getPaddedHex(this.N)}${this.getPaddedHex(this.g)}`, { from: "hex", to: "hex" }),
-      16
-    );
-    this.timestamp = this.createTimestamp();
-
     const context = this.encoder.encode("Caldera Derived Key");
     const spacer = this.encoder.encode(String.fromCharCode(1));
     this.info = this.concatenateArrays(context, spacer);
+
+    if (typeof window !== "undefined" && window.crypto) this.crypto = window.crypto;
+    if (typeof process === "object" && process.versions && process.versions.node) {
+      this.crypto = require("crypto").webcrypto;
+    }
   }
 
   /**
@@ -57,26 +52,14 @@ export default class CognitoSRP {
    * This function performs a modular exponentiation operation to generate an authentication value based on SRP (Secure Remote Password) protocol.
    * It checks for the legality of the computed value to ensure it does not equal zero when modulated by N.
    *
-   * @returns A promise that resolves to the hexadecimal representation of the authentication value.
+   * @returns A hexadecimal representation of the authentication value.
    * @throws {Error} If the computed value modulo N is zero or if there are other processing errors.
    */
-  public async calculateSRPAValue(): Promise<string> {
-    // TODO: see if i can create this value in the constructor somehow. Why is this async in the first place?
-    this.A = await new Promise((resolve, reject) => {
-      this.g.modPow(this.a, this.N, (err: unknown, A: AuthBigInteger) => {
-        if (err) {
-          reject(err);
-          return;
-        }
+  public calculateSRPAValue(): string {
+    this.a = new BigInteger(this.getRandomHexString(), 16);
+    this.A = this.g.modPow(this.a, this.N);
 
-        if (A.mod(this.N).equals(BigInteger.ZERO)) {
-          reject(new Error("Illegal parameter. A mod N cannot be 0."));
-          return;
-        }
-
-        resolve(A);
-      });
-    });
+    if (this.A.mod(this.N).equals(BigInteger.ZERO)) throw new Error("Illegal parameter. A mod N cannot be 0.");
 
     return this.A.toString(16);
   }
@@ -93,7 +76,7 @@ export default class CognitoSRP {
    * @returns The password claim signature value.
    * @throws {Error} Throws an error if the calculation fails.
    */
-  public async calculatePasswordClaimSignature(
+  public calculatePasswordClaimSignature(
     password: string,
     challengeParameters: {
       USER_ID_FOR_SRP: string;
@@ -101,24 +84,22 @@ export default class CognitoSRP {
       SECRET_BLOCK: string;
       SRP_B: string;
     }
-  ): Promise<string> {
+  ): string {
+    this.timestamp = this.createTimestamp();
     const serverBValue = new BigInteger(challengeParameters.SRP_B, 16);
 
     if (serverBValue.mod(this.N).equals(BigInteger.ZERO)) throw new Error("B cannot be zero.");
 
     const U = this.calculateU(serverBValue);
     const serverSalt = new BigInteger(challengeParameters.SALT, 16);
+    const userPasswordHash = this.createHash(`${this.userPoolName}${challengeParameters.USER_ID_FOR_SRP}:${password}`, {
+      to: "hex",
+    });
     const x = new BigInteger(
-      this.createHash(
-        `${this.getPaddedHex(serverSalt)}${this.createHash(
-          `${this.userPoolName}${challengeParameters.USER_ID_FOR_SRP}:${password}`,
-          { to: "hex" }
-        )}`,
-        { from: "hex", to: "hex" }
-      ),
+      this.createHash(`${this.getPaddedHex(serverSalt)}${userPasswordHash}`, { from: "hex", to: "hex" }),
       16
     );
-    const S = await this.calculateS(x, serverBValue, U);
+    const S = this.calculateS(x, serverBValue, U);
 
     const concatenatedArray = this.concatenateArrays(
       this.encoder.encode(this.userPoolName),
@@ -135,6 +116,12 @@ export default class CognitoSRP {
     const awsHash = this.createHash(concatenatedArray, { secret: awsHashHmac.slice(0, 16) });
 
     return btoa(Array.from(awsHash, (byte) => String.fromCodePoint(byte)).join(""));
+  }
+
+  private getRandomHexString(): string {
+    const buffer = new Uint8Array(16);
+    this.crypto.getRandomValues(buffer);
+    return this.getHexFromBytes(buffer);
   }
 
   private concatenateArrays(...arrays: Uint8Array[]): Uint8Array {
@@ -160,29 +147,8 @@ export default class CognitoSRP {
     return U;
   }
 
-  private calculateS(x: AuthBigInteger, B: AuthBigInteger, U: AuthBigInteger): Promise<AuthBigInteger> {
-    return new Promise((resolve, reject) => {
-      this.g.modPow(x, this.N, (outerErr: unknown, outerResult: AuthBigInteger) => {
-        if (outerErr) {
-          reject(outerErr);
-
-          return;
-        }
-
-        B.subtract(this.k.multiply(outerResult)).modPow(
-          this.a.add(U.multiply(x)),
-          this.N,
-          (innerErr: unknown, innerResult: AuthBigInteger) => {
-            if (innerErr) {
-              reject(innerErr);
-
-              return;
-            }
-            resolve(innerResult.mod(this.N));
-          }
-        );
-      });
-    });
+  private calculateS(x: AuthBigInteger, B: AuthBigInteger, U: AuthBigInteger): AuthBigInteger {
+    return B.subtract(this.k.multiply(this.g.modPow(x, this.N))).modPow(this.a.add(U.multiply(x)), this.N);
   }
 
   private getBytesFromHex(encoded: string): Uint8Array {
