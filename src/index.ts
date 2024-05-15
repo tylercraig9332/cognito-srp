@@ -1,6 +1,6 @@
 import { Sha256 } from "@aws-crypto/sha256-js";
 import { SourceData } from "@smithy/types";
-import BigInteger, { AuthBigInteger } from "./BigInteger";
+import { modPow } from "./bigIntUtils";
 
 export default class CognitoSRP {
   private readonly INIT_N =
@@ -20,25 +20,21 @@ export default class CognitoSRP {
     "F12FFA06D98A0864D87602733EC86A64521F2B18177B200C" +
     "BBE117577A615D6C770988C0BAD946E208E24FA074E5AB31" +
     "43DB5BFCE0FD108E4B82D120A93AD2CAFFFFFFFFFFFFFFFF";
-  private readonly N = new BigInteger(this.INIT_N, 16);
-  private readonly g = new BigInteger("2", 16);
-  private readonly k = new BigInteger(
-    this.createHash(`${this.getPaddedHex(this.N)}${this.getPaddedHex(this.g)}`, { from: "hex", to: "hex" }),
-    16
+  private readonly N = BigInt(`0x${this.INIT_N}`);
+  private readonly g = 2n;
+  private readonly k = BigInt(
+    `0x${this.getHexFromBytes(
+      this.createHash(this.getBytesFromHex(`${this.getPaddedHex(this.N)}${this.getPaddedHex(this.g)}`))
+    )}`
   );
-  private a!: AuthBigInteger;
-  private A!: AuthBigInteger;
-  private info: Uint8Array;
+  private a!: bigint;
+  private A!: bigint;
   private crypto!: Crypto;
   private encoder = new TextEncoder();
 
   public timestamp!: string;
 
   constructor(private userPoolName: string) {
-    const context = this.encoder.encode("Caldera Derived Key");
-    const spacer = this.encoder.encode(String.fromCharCode(1));
-    this.info = this.concatenateArrays(context, spacer);
-
     if (typeof window !== "undefined" && window.crypto) this.crypto = window.crypto;
     if (typeof process === "object" && process.versions && process.versions.node) {
       this.crypto = require("crypto").webcrypto;
@@ -56,10 +52,11 @@ export default class CognitoSRP {
    * @throws {Error} If the computed value modulo N is zero or if there are other processing errors.
    */
   public calculateSRPAValue(): string {
-    this.a = new BigInteger(this.getRandomHexString(), 16);
-    this.A = this.g.modPow(this.a, this.N);
+    const buffer = new Uint8Array(16);
+    this.crypto.getRandomValues(buffer);
 
-    if (this.A.mod(this.N).equals(BigInteger.ZERO)) throw new Error("Illegal parameter. A mod N cannot be 0.");
+    this.a = BigInt(`0x${this.getHexFromBytes(buffer)}`);
+    this.A = modPow(this.g, this.a, this.N);
 
     return this.A.toString(16);
   }
@@ -86,19 +83,17 @@ export default class CognitoSRP {
     }
   ): string {
     this.timestamp = this.createTimestamp();
-    const serverBValue = new BigInteger(challengeParameters.SRP_B, 16);
+    const serverBValue = BigInt(`0x${challengeParameters.SRP_B}`);
 
-    if (serverBValue.mod(this.N).equals(BigInteger.ZERO)) throw new Error("B cannot be zero.");
+    if (serverBValue % this.N === 0n) throw new Error("Invalid server public key");
 
     const U = this.calculateU(serverBValue);
-    const serverSalt = new BigInteger(challengeParameters.SALT, 16);
-    const userPasswordHash = this.createHash(`${this.userPoolName}${challengeParameters.USER_ID_FOR_SRP}:${password}`, {
-      to: "hex",
-    });
-    const x = new BigInteger(
-      this.createHash(`${this.getPaddedHex(serverSalt)}${userPasswordHash}`, { from: "hex", to: "hex" }),
-      16
+    const serverSalt = BigInt(`0x${challengeParameters.SALT}`);
+    const userPasswordHash = this.createHash(`${this.userPoolName}${challengeParameters.USER_ID_FOR_SRP}:${password}`);
+    const saltedUserPassHash = this.createHash(
+      this.getBytesFromHex(`${this.getPaddedHex(serverSalt)}${this.getHexFromBytes(userPasswordHash)}`)
     );
+    const x = BigInt(`0x${this.getHexFromBytes(saltedUserPassHash)}`);
     const S = this.calculateS(x, serverBValue, U);
 
     const concatenatedArray = this.concatenateArrays(
@@ -108,20 +103,18 @@ export default class CognitoSRP {
       this.encoder.encode(this.timestamp)
     );
 
-    const awsHashHmac = this.createHash(this.info, {
-      secret: this.createHash(this.getBytesFromHex(this.getPaddedHex(S)), {
-        secret: this.getBytesFromHex(this.getPaddedHex(U)),
-      }),
-    });
-    const awsHash = this.createHash(concatenatedArray, { secret: awsHashHmac.slice(0, 16) });
+    const context = this.encoder.encode("Caldera Derived Key");
+    const spacer = this.encoder.encode(String.fromCharCode(1));
+    const info = this.concatenateArrays(context, spacer);
+
+    const hmacSecret = this.createHash(
+      this.getBytesFromHex(this.getPaddedHex(S)),
+      this.getBytesFromHex(this.getPaddedHex(U))
+    );
+    const awsHashHmac = this.createHash(info, hmacSecret);
+    const awsHash = this.createHash(concatenatedArray, awsHashHmac.slice(0, 16));
 
     return btoa(Array.from(awsHash, (byte) => String.fromCodePoint(byte)).join(""));
-  }
-
-  private getRandomHexString(): string {
-    const buffer = new Uint8Array(16);
-    this.crypto.getRandomValues(buffer);
-    return this.getHexFromBytes(buffer);
   }
 
   private concatenateArrays(...arrays: Uint8Array[]): Uint8Array {
@@ -136,19 +129,21 @@ export default class CognitoSRP {
     return concatenatedArray;
   }
 
-  private calculateU(B: AuthBigInteger): AuthBigInteger {
-    const U = new BigInteger(
-      this.createHash(this.getPaddedHex(this.A) + this.getPaddedHex(B), { from: "hex", to: "hex" }),
-      16
-    );
+  private calculateU(B: bigint): bigint {
+    const hexAB = `${this.getPaddedHex(this.A)}${this.getPaddedHex(B)}`;
+    const hashHex = this.getHexFromBytes(this.createHash(this.getBytesFromHex(hexAB)));
+    const U = BigInt(`0x${hashHex}`);
 
-    if (U.equals(BigInteger.ZERO)) throw new Error("U cannot be zero.");
+    if (U === 0n) throw new Error("U cannot be zero.");
 
     return U;
   }
 
-  private calculateS(x: AuthBigInteger, B: AuthBigInteger, U: AuthBigInteger): AuthBigInteger {
-    return B.subtract(this.k.multiply(this.g.modPow(x, this.N))).modPow(this.a.add(U.multiply(x)), this.N);
+  private calculateS(x: bigint, B: bigint, U: bigint): bigint {
+    const t0 = modPow(this.g, x, this.N) * this.k;
+    const t1 = B - t0;
+    const t2 = this.a + U * x;
+    return modPow(t1, t2, this.N);
   }
 
   private getBytesFromHex(encoded: string): Uint8Array {
@@ -165,39 +160,26 @@ export default class CognitoSRP {
       .join("");
   }
 
-  private createHash(data: string, options: { from: "hex" }): Uint8Array;
-  private createHash(data: string, options: { from: "hex"; to: "hex" }): string;
-  private createHash(data: SourceData, options: { to: "hex" }): string;
-  private createHash(data: SourceData): Uint8Array;
-  private createHash(data: SourceData, options: { secret: SourceData }): Uint8Array;
-  private createHash(
-    data: SourceData,
-    options?: { from?: "hex"; to?: "hex"; secret?: SourceData }
-  ): Uint8Array | string {
-    const sha256 = new Sha256(options?.secret);
-    sha256.update(options?.from === "hex" && typeof data === "string" ? this.getBytesFromHex(data) : data);
-    const hashBytes = sha256.digestSync();
-
-    return options?.to === "hex" ? this.getHexFromBytes(hashBytes) : hashBytes;
+  private createHash(data: SourceData, secret?: SourceData): Uint8Array {
+    const sha256 = new Sha256(secret);
+    sha256.update(data);
+    return sha256.digestSync();
   }
 
-  private getPaddedHex(bigInt: AuthBigInteger): string {
-    if (!(bigInt instanceof BigInteger)) throw new Error("Not a BigInteger");
-
-    /* Get a hex string for abs(bigInt) */
-    let hex: string = bigInt.abs().toString(16);
+  private getPaddedHex(bigInt: bigint): string {
+    let hex: string = bigInt.toString(16);
     /* Pad hex to even length if needed */
     hex = hex.length % 2 !== 0 ? `0${hex}` : hex;
     /* Prepend "00" if the most significant bit is set */
     hex = /^[89a-f]/i.test(hex) ? `00${hex}` : hex;
 
-    if (bigInt.compareTo(BigInteger.ZERO) < 0) {
+    if (bigInt < 0n) {
       const invertedHex = hex
         .split("")
         .map((nibble) => (~parseInt(nibble, 16) & 0xf).toString(16).toUpperCase())
         .join("");
 
-      hex = new BigInteger(invertedHex, 16).add(BigInteger.ONE).toString(16);
+      hex = (BigInt(`0x${invertedHex}`) + 1n).toString(16);
 
       if (hex.toUpperCase().startsWith("FF8")) hex = hex.substring(2);
     }
